@@ -1,0 +1,238 @@
+---
+output:
+   html_document: 
+      toc: true
+      toc_depth: 3
+      number_sections: true
+      toc_float: true
+      fig_caption: true
+      fig_width: 8.5
+      fig_height: 5  
+      css: "style.css"
+params:
+   reportdate: !r format(Sys.time(), '%B %d, %Y')
+yourParam: "`r Sys.Date()`"
+title: "Kaggle - October 2021"
+date: "`r params$reportdate`"
+---
+
+
+```{r setup, cache=FALSE, echo=FALSE, warning=FALSE, message=FALSE}
+
+library(ggplot2)
+library(ggthemes)
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(stringr)
+library(scales)
+library(grid)
+library(tidyr)
+library(zoo)
+
+
+library(xgboost)
+library(caret)
+
+
+#https://rstudio-pubs-static.s3.amazonaws.com/240657_5157ff98e8204c358b2118fa69162e18.html
+
+library(ggpubr)
+library(Hmisc)
+library(corrplot)
+
+
+#https://www.kaggle.com/rtatman/machine-learning-with-xgboost-in-r/
+#https://www.r-bloggers.com/2021/03/time-series-forecasting-with-xgboost-and-feature-importance/
+
+library(xts)
+library(dygraphs)
+
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE, message=FALSE)
+#options(knitr.table.format = "html")
+
+
+```
+
+```{css, eval=FALSE, echo=FALSE}
+
+#html formatting.
+#https://bookdown.org/yihui/rmarkdown-cookbook/html-css.html
+#https://stackoverflow.com/questions/30446905/rmarkdown-font-size-and-header
+#https://holtzy.github.io/Pimp-my-rmd/
+
+
+#dygraphs for R:
+##http://rstudio.github.io/dygraphs/gallery-event-lines.html
+##qxts <- xts(q[,-1], order.by=q[,1])
+
+
+#preventing code wrap. I added to css file:
+#https://stackoverflow.com/questions/36845178/width-of-r-code-chunk-output-in-rmarkdown-files-knitr-ed-to-html
+
+#colors=RColorBrewer::brewer.pal(3, "Set2")
+
+```
+
+
+***
+
+# Data import 
+
+I found the nrows argument can only bring in a portion of the training data set, it was stalling my computer!
+
+```{r cache=TRUE}
+#Data import and cleaning
+
+#Section: Training data
+train_raw = read.csv("./data/train.csv", stringsAsFactors = FALSE, nrows=2000) #FIRST 2000 rows!!
+
+
+```
+
+
+
+
+
+# Data preparation
+
+```{r dfPrepare, cache=TRUE}
+
+
+df2 = train_raw %>%
+  mutate(flg = sample(1:2, size=nrow(train_raw), prob=c(0.7,0.3), replace = TRUE))
+  #mutate(flg = ifelse(DateTime >= ymd('20200201'), 2, 1))
+
+
+```
+
+
+# Model preparation
+
+```{r modelPrepare}
+
+
+#training data, needs to be matrix
+train_data = df2 %>%
+  filter(flg == 1) %>%
+  select(-flg, -target) %>%
+  as.matrix() 
+
+train_labels = df2 %>%
+  filter(flg == 1)
+
+train_labels = train_labels$target
+  
+
+#testing data, needs to be matrix
+test_data = df2 %>%
+  filter(flg == 2) %>%
+  select(-flg, -target)  %>%
+  as.matrix() 
+
+
+test_labels = df2 %>%
+  filter(flg == 2)
+
+test_labels = test_labels$target
+
+
+
+##################
+
+dtrain_caret = xgb.DMatrix(data = train_data)
+dtest_caret = xgb.DMatrix(data = test_data)
+
+```
+
+
+# Model training
+
+
+```{r training, cache=TRUE}
+
+
+
+# https://topepo.github.io/caret/index.html
+# http://zevross.com/blog/2017/09/19/predictive-modeling-and-machine-learning-in-r-with-the-caret-package/#a-real-world-example-air-quality-data-from-nyc
+
+xgb_trcontrol = trainControl(
+  method = "cv", 
+  number = 5,
+  allowParallel = TRUE, #a logical that governs whether train should use parallel processing (if available) 
+  verboseIter = FALSE, #A logical for printing a training log.
+  returnData = FALSE #A logical for saving the data into a slot called trainingData
+)
+
+xgb_grid = expand.grid(
+  list(
+    nrounds = seq(50,150),
+    max_depth = c(5, 10, 15),
+    colsample_bytree = 1,   #Subsample Ratio of Columns, default is 1
+    eta = 0.1, #Shrinkage, default is 0.3
+    gamma = 0, #Minimum Loss Reduction, default is 0
+    min_child_weight = 1, #Minimum Sum of Instance Weight, default is 1  
+    subsample = 1) #Subsample Percentage, default is 1
+)
+
+
+#Building the model
+model_caret = train(
+  dtrain_caret, train_labels,
+  trControl = xgb_trcontrol,
+  tuneGrid = xgb_grid,
+  method = "xgbTree",
+  nthread = 10  #the number of CPU threads we are going to use;
+)
+
+model_caret$bestTune
+#model_caret$finalModel
+#plot(model_caret)
+
+#model_caret
+
+
+#Feature importance
+xgb_imp = xgb.importance(
+  feature_names = colnames(dtrain_caret),
+  model = model_caret$finalModel)
+
+#xgb_imp
+
+```
+
+
+# Predictions
+
+
+```{r predict, cache=TRUE}
+
+pred = predict(model_caret, dtest_caret)
+
+```
+
+
+```{r visual, cache=TRUE}
+
+#predicted, train, observed
+
+
+A = df2 %>%
+  filter(flg == 2) %>%
+  cbind(pred) %>%
+  rename(target_obv = target, target_pred = pred) %>%
+  select(id, target_obv, target_pred) %>%
+  filter(id >= 500 & id <= 600) %>% #so I can read it!
+  gather(key = lab, value = value, -id, factor_key = TRUE) 
+
+ggplot(data = A)+ 
+  geom_line(aes(x=id, y=value, colour = lab))
+  
+
+```
+
+
+
+
+
+
